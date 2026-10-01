@@ -28,7 +28,7 @@ def index(): return render_template("index.html")
 @app.route("/process",methods=["POST"])
 def process():
     job_id=uuid.uuid4().hex[:12]
-    mode=request.form.get("mode","smart"); captions=request.form.get("captions","burn"); whisper_model=request.form.get("whisper_model","small")
+    mode=request.form.get("mode","smart"); captions=request.form.get("captions","none"); whisper_model=request.form.get("whisper_model","small")
     raw_max=request.form.get("max_clips","").strip()
     try:
         max_clips=int(raw_max) if raw_max else None
