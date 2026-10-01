@@ -1,29 +1,44 @@
 """
-clipper_core.py — the actual video-splitting/captioning logic, shared by
-the command-line tool and the local web app. No CLI/Flask code lives here.
+clipper_core.py — lightweight video processing logic for the Reframe web app.
+Uses yt-dlp and imageio-ffmpeg; no PyTorch, Whisper, OpenCV, NumPy, MoviePy,
+or PySceneDetect dependencies are required.
 """
 
 import os
-import subprocess
-import sys
+import re
 import shutil
+import subprocess
 import tempfile
 
-
+import imageio_ffmpeg
 
 
 def is_url(s: str) -> bool:
     return s.startswith("http://") or s.startswith("https://")
 
 
+def ffmpeg_exe() -> str:
+    """Return the bundled imageio-ffmpeg executable, with PATH fallback."""
+    try:
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        path = shutil.which("ffmpeg")
+        if path:
+            return path
+        raise RuntimeError("FFmpeg executable is unavailable.")
+
+
 def check_ffmpeg():
-    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-        raise RuntimeError("ffmpeg/ffprobe not found on PATH. Install ffmpeg first.")
+    exe = ffmpeg_exe()
+    result = subprocess.run([exe, "-version"], capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError("FFmpeg could not be started.")
+    return exe
 
 
 def download_video(url: str, workdir: str, log=print) -> str:
     if not shutil.which("yt-dlp"):
-        raise RuntimeError("yt-dlp not installed. Run: pip install yt-dlp")
+        raise RuntimeError("yt-dlp is not available in the runtime.")
     out_path = os.path.join(workdir, "source.mp4")
     cmd = [
         "yt-dlp",
@@ -44,26 +59,28 @@ def download_video(url: str, workdir: str, log=print) -> str:
 
 
 def get_duration(path: str) -> float:
-    cmd = [
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", path,
-    ]
-    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    return float(result.stdout.strip())
+    """Read duration from FFmpeg output without requiring ffprobe."""
+    cmd = [ffmpeg_exe(), "-hide_banner", "-i", path, "-f", "null", "-"]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr)
+    if not match:
+        raise RuntimeError("Could not determine video duration.")
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
 def cut_clip(src: str, start: float, end: float, out_path: str, reencode: bool = False):
     duration = end - start
     if reencode:
         cmd = [
-            "ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", src,
+            ffmpeg_exe(), "-y", "-ss", f"{start:.2f}", "-i", src,
             "-t", f"{duration:.2f}",
             "-c:v", "libx264", "-c:a", "aac", "-preset", "veryfast",
             out_path,
         ]
     else:
         cmd = [
-            "ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", src,
+            ffmpeg_exe(), "-y", "-ss", f"{start:.2f}", "-i", src,
             "-t", f"{duration:.2f}",
             "-c", "copy", "-avoid_negative_ts", "make_zero",
             out_path,
@@ -87,9 +104,13 @@ def plan_fixed(total_duration: float, min_len: float, max_len: float):
 
 
 def detect_scenes(src: str):
-    """Lightweight scene detection using ffmpeg metadata; no OpenCV dependency."""
-    cmd = ["ffmpeg", "-hide_banner", "-i", src, "-filter:v", "select='gt(scene,0.27)',showinfo", "-f", "null", "-"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    """Lightweight scene detection using FFmpeg metadata."""
+    cmd = [
+        ffmpeg_exe(), "-hide_banner", "-i", src,
+        "-filter:v", "select='gt(scene,0.27)',showinfo",
+        "-f", "null", "-",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     timestamps = [0.0]
     for line in result.stderr.splitlines():
         marker = "pts_time:"
@@ -114,19 +135,21 @@ def group_scenes_into_clips(scenes, min_len: float, max_len: float):
         if (e - cur_start) <= max_len:
             cur_end = e
         else:
-            clips.append((cur_start, cur_end))
+            if cur_end - cur_start >= min_len:
+                clips.append((cur_start, cur_end))
             cur_start = s
             cur_end = e
-    clips.append((cur_start, cur_end))
+    if cur_end - cur_start >= min_len:
+        clips.append((cur_start, cur_end))
     return clips
 
 
 def score_segment_loudness(src: str, start: float, end: float) -> float:
     cmd = [
-        "ffmpeg", "-i", src, "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}",
+        ffmpeg_exe(), "-i", src, "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}",
         "-af", "volumedetect", "-vn", "-sn", "-dn", "-f", "null", "-",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     mean_db = -91.0
     for line in result.stderr.splitlines():
         if "mean_volume:" in line:
@@ -136,8 +159,6 @@ def score_segment_loudness(src: str, start: float, end: float) -> float:
                 pass
     return mean_db
 
-
-# --- captions ---
 
 def transcribe_clip(clip_path: str, model_name: str, log=print):
     raise RuntimeError("Speech transcription is not included in the lightweight Vercel build.")
@@ -160,37 +181,21 @@ def write_srt(segments, srt_path: str):
 
 
 def _escape_path_for_ffmpeg_filter(path: str) -> str:
-    p = os.path.abspath(path)
-    p = p.replace("\\", "/")
-    p = p.replace(":", "\\:")
-    return p
+    p = os.path.abspath(path).replace("\\", "/")
+    return p.replace(":", "\\:")
 
 
 def burn_captions(video_path: str, srt_path: str, out_path: str):
     escaped = _escape_path_for_ffmpeg_filter(srt_path)
     style = "FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2"
     cmd = [
-        "ffmpeg", "-y", "-i", video_path,
+        ffmpeg_exe(), "-y", "-i", video_path,
         "-vf", f"subtitles='{escaped}':force_style='{style}'",
         "-c:v", "libx264", "-c:a", "copy", "-preset", "veryfast",
         out_path,
     ]
     subprocess.run(cmd, check=True, capture_output=True)
 
-
-def add_captions_to_clip(clip_path: str, model_name: str, mode: str, log=print):
-    segments, language = transcribe_clip(clip_path, model_name, log=log)
-    srt_path = os.path.splitext(clip_path)[0] + ".srt"
-    write_srt(segments, srt_path)
-    if mode == "burn":
-        tmp_out = clip_path + ".captioned.mp4"
-        burn_captions(clip_path, srt_path, tmp_out)
-        os.replace(tmp_out, clip_path)
-        os.remove(srt_path)
-    return language
-
-
-# --- top-level orchestration, used by both CLI and web app ---
 
 def run_pipeline(
     input_source: str,
@@ -204,9 +209,6 @@ def run_pipeline(
     reencode: bool = False,
     log=print,
 ):
-    """Runs the full pipeline. input_source is either a local file path or
-    a URL. Returns a list of dicts: [{filename, start, end, language}, ...]
-    Raises on unrecoverable errors; calls log(str) throughout for progress."""
     check_ffmpeg()
     os.makedirs(output_dir, exist_ok=True)
     results = []
@@ -243,13 +245,15 @@ def run_pipeline(
             filename = f"clip_{i:03d}_{int(start)}s-{int(end)}s.mp4"
             out_path = os.path.join(output_dir, filename)
             cut_clip(src, start, end, out_path, reencode=reencode)
-
             language = None
+
             if captions != "none":
                 log("Captions are unavailable in the lightweight Vercel build; continuing without captions.")
 
-            log(f"Clip {i}/{len(segments)} done ({start:.0f}s-{end:.0f}s)" +
-                (f" [{language}]" if language else ""))
+            log(
+                f"Clip {i}/{len(segments)} done ({start:.0f}s-{end:.0f}s)"
+                + (f" [{language}]" if language else "")
+            )
             results.append({
                 "filename": filename,
                 "start": start,
