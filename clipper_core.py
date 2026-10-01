@@ -9,7 +9,7 @@ import sys
 import shutil
 import tempfile
 
-_WHISPER_MODEL_CACHE = {}
+
 
 
 def is_url(s: str) -> bool:
@@ -87,18 +87,21 @@ def plan_fixed(total_duration: float, min_len: float, max_len: float):
 
 
 def detect_scenes(src: str):
-    try:
-        from scenedetect import open_video, SceneManager
-        from scenedetect.detectors import ContentDetector
-    except ImportError:
-        raise RuntimeError("scene/smart mode needs PySceneDetect. Run: pip install scenedetect[opencv]")
-
-    video = open_video(src)
-    scene_manager = SceneManager()
-    scene_manager.add_detector(ContentDetector(threshold=27.0))
-    scene_manager.detect_scenes(video)
-    scene_list = scene_manager.get_scene_list()
-    return [(s.get_seconds(), e.get_seconds()) for s, e in scene_list]
+    """Lightweight scene detection using ffmpeg metadata; no OpenCV dependency."""
+    cmd = ["ffmpeg", "-hide_banner", "-i", src, "-filter:v", "select='gt(scene,0.27)',showinfo", "-f", "null", "-"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    timestamps = [0.0]
+    for line in result.stderr.splitlines():
+        marker = "pts_time:"
+        if marker in line:
+            try:
+                value = float(line.split(marker, 1)[1].split()[0])
+                if value > timestamps[-1] + 0.5:
+                    timestamps.append(value)
+            except (ValueError, IndexError):
+                pass
+    timestamps.append(get_duration(src))
+    return list(zip(timestamps[:-1], timestamps[1:]))
 
 
 def group_scenes_into_clips(scenes, min_len: float, max_len: float):
@@ -136,23 +139,8 @@ def score_segment_loudness(src: str, start: float, end: float) -> float:
 
 # --- captions ---
 
-def load_whisper_model(model_name: str, log=print):
-    if model_name in _WHISPER_MODEL_CACHE:
-        return _WHISPER_MODEL_CACHE[model_name]
-    try:
-        import whisper
-    except ImportError:
-        raise RuntimeError("Captions need openai-whisper. Run: pip install openai-whisper")
-    log(f"Loading whisper model '{model_name}' (first run downloads it)...")
-    model = whisper.load_model(model_name)
-    _WHISPER_MODEL_CACHE[model_name] = model
-    return model
-
-
 def transcribe_clip(clip_path: str, model_name: str, log=print):
-    model = load_whisper_model(model_name, log=log)
-    result = model.transcribe(clip_path, task="transcribe", language=None, verbose=False)
-    return result.get("segments", []), result.get("language", "unknown")
+    raise RuntimeError("Speech transcription is not included in the lightweight Vercel build.")
 
 
 def _srt_timestamp(seconds: float) -> str:
@@ -211,7 +199,7 @@ def run_pipeline(
     min_len: float = 60.0,
     max_len: float = 90.0,
     max_clips: int = None,
-    captions: str = "burn",
+    captions: str = "none",
     whisper_model: str = "small",
     reencode: bool = False,
     log=print,
@@ -258,8 +246,7 @@ def run_pipeline(
 
             language = None
             if captions != "none":
-                log(f"Clip {i}/{len(segments)}: transcribing...")
-                language = add_captions_to_clip(out_path, whisper_model, captions, log=log)
+                log("Captions are unavailable in the lightweight Vercel build; continuing without captions.")
 
             log(f"Clip {i}/{len(segments)} done ({start:.0f}s-{end:.0f}s)" +
                 (f" [{language}]" if language else ""))
