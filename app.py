@@ -30,13 +30,30 @@ def parse_json(t):
     return json.loads(re.search(r"[\[{].*[\]}]", t, re.S).group(0))
 
 # ---------- pipeline steps ----------
-def download(url, d):
+def download(url, d, cookies_file=None, user_agent=""):
     import yt_dlp
-    opts = {"outtmpl": str(d / "source.%(ext)s"), "noplaylist": True, "quiet": True,
-            "format": "bv*[height<=1080]+ba/b[height<=1080]/b", "merge_output_format": "mp4"}
+    opts = {
+        "outtmpl": str(d / "source.%(ext)s"),
+        "noplaylist": True,
+        "quiet": True,
+        "format": "bv*[height<=1080]+ba/b[height<=1080]/b",
+        "merge_output_format": "mp4",
+        "retries": 3,
+        "fragment_retries": 3,
+        "socket_timeout": 30,
+    }
+    if cookies_file:
+        opts["cookiefile"] = str(cookies_file)
+    if user_agent.strip():
+        opts["http_headers"] = {"User-Agent": user_agent.strip()}
+    if "youtube.com" in url or "youtu.be" in url:
+        opts["extractor_args"] = {"youtube": {"player_client": ["web_embedded", "mweb", "tv"]}}
     with yt_dlp.YoutubeDL(opts) as y:
         y.download([url])
-    return next(d.glob("source.*"))
+    files = [p for p in d.glob("source.*") if p.suffix.lower() not in {".part", ".ytdl"}]
+    if not files:
+        raise RuntimeError("Download finished without producing a video file")
+    return files[0]
 
 def transcribe(path, size):
     from faster_whisper import WhisperModel
@@ -141,7 +158,12 @@ def run(jid, f, src):
     try:
         cfg = {"provider": f.get("provider", "ollama"), "model": f.get("model") or "llama3.1"}
         if src is None:
-            log("Downloading video", 5); src = download(f["url"], d)
+            log("Downloading video", 5)
+            cookies_file = None
+            if f.get("cookies_upload"):
+                cookies_file = d / "cookies.txt"
+                cookies_file.write_text(f["cookies_upload"], encoding="utf-8")
+            src = download(f["url"], d, cookies_file, f.get("user_agent", ""))
         log("Transcribing (first run downloads the Whisper model)", 20)
         segs = transcribe(src, f.get("whisper", "small"))
         if not segs:
@@ -174,15 +196,24 @@ def run(jid, f, src):
 def start():
     f, jid = request.form, uuid.uuid4().hex[:8]
     d = ROOT / jid
-    d.mkdir()
+    d.mkdir(parents=True, exist_ok=True)
     src, up = None, request.files.get("file")
+    cookie_up = request.files.get("cookies")
+    cookies_upload = None
+    if cookie_up and cookie_up.filename:
+        try:
+            cookies_upload = cookie_up.read().decode("utf-8")
+        except UnicodeDecodeError:
+            return jsonify(error="The cookies file must be a UTF-8 Netscape cookies.txt file"), 400
     if up and up.filename:
         src = d / ("source" + Path(up.filename).suffix)
         up.save(src)
     elif not f.get("url"):
         return jsonify(error="Paste a link or choose a file"), 400
+    job_form = dict(f)
+    job_form["cookies_upload"] = cookies_upload
     JOBS[jid] = {"status": "running", "pct": 0, "log": [], "result": None, "error": None}
-    threading.Thread(target=run, args=(jid, dict(f), src), daemon=True).start()
+    threading.Thread(target=run, args=(jid, job_form, src), daemon=True).start()
     return jsonify(id=jid)
 
 @app.get("/api/job/<jid>")
@@ -216,10 +247,12 @@ button,.btn{background:var(--ac);color:var(--aci);border:0;border-radius:999px;p
 .mute{color:var(--mute);font-size:14px}.card p{white-space:pre-wrap;margin:6px 0}.card a{color:var(--ac)}
 #bar{height:8px;background:var(--ac);border-radius:8px;width:0;transition:width .4s}#track{background:var(--line);border-radius:8px;margin:8px 0}
 </style></head><body><main>
-<h1>Clipmaker</h1><p class="mute">One video in. Captioned vertical clips and posts out. Everything runs on this computer.</p>
+<h1>Clipmaker</h1><p class="mute">One video in. Captioned vertical clips and posts out. Upload a file directly, or paste a public video link.</p>
 <form id="f">
 <label>Video link (YouTube, TikTok, Instagram, X, Facebook)</label><input name="url" type="url" placeholder="https://...">
 <label>or upload a file</label><input name="file" type="file" accept="video/*,audio/*">
+<label>YouTube cookies (optional, only if YouTube asks you to sign in)</label><input name="cookies" type="file" accept=".txt,text/plain">
+<label>Browser User-Agent (optional, used with YouTube cookies)</label><input name="user_agent" type="text" placeholder="Mozilla/5.0 ...">
 <label>Your own posts (a few, so the writing sounds like you)</label><textarea name="voice" rows="4"></textarea>
 <div class="row">
 <div><label>Clips</label><input name="n" type="number" min="1" max="10" value="5"></div>
