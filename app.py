@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Clipmaker: video link or file -> scored, captioned 9:16 clips + posts in your voice.
 Run:  python app.py   then open http://localhost:5000"""
-import json, os, re, subprocess, threading, uuid
+import json, os, re, socket, subprocess, threading, uuid
 from pathlib import Path
 import requests
 from flask import Flask, request, jsonify, send_from_directory, Response
@@ -30,7 +30,7 @@ def parse_json(t):
     return json.loads(re.search(r"[\[{].*[\]}]", t, re.S).group(0))
 
 # ---------- pipeline steps ----------
-def download(url, d, cookies_file=None, user_agent=""):
+def download(url, d, cookies_file=None, user_agent="", youtube_browser=""):
     import yt_dlp
     opts = {
         "outtmpl": str(d / "source.%(ext)s"),
@@ -44,6 +44,8 @@ def download(url, d, cookies_file=None, user_agent=""):
     }
     if cookies_file:
         opts["cookiefile"] = str(cookies_file)
+    if youtube_browser.strip() and ("youtube.com" in url or "youtu.be" in url):
+        opts["cookiesfrombrowser"] = (youtube_browser.strip(),)
     if user_agent.strip():
         opts["http_headers"] = {"User-Agent": user_agent.strip()}
     if "youtube.com" in url or "youtu.be" in url:
@@ -163,7 +165,7 @@ def run(jid, f, src):
             if f.get("cookies_upload"):
                 cookies_file = d / "cookies.txt"
                 cookies_file.write_text(f["cookies_upload"], encoding="utf-8")
-            src = download(f["url"], d, cookies_file, f.get("user_agent", ""))
+            src = download(f["url"], d, cookies_file, f.get("user_agent", ""), f.get("youtube_browser", ""))
         log("Transcribing (first run downloads the Whisper model)", 20)
         segs = transcribe(src, f.get("whisper", "small"))
         if not segs:
@@ -286,5 +288,16 @@ if(location.hash.length>1)watch(location.hash.slice(1));
 </script></main></body></html>"""
 
 if __name__ == "__main__":
-    print("Open http://localhost:5000")
-    app.run(host="127.0.0.1", port=5000)
+    host = os.environ.get("CLIPMAKER_HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "5000"))
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        lan_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        lan_ip = socket.gethostbyname(socket.gethostname())
+    print(f"Open on this computer: http://localhost:{port}")
+    if host == "0.0.0.0":
+        print(f"Open from another device on the same Wi-Fi: http://{lan_ip}:{port}")
+    app.run(host=host, port=port)
