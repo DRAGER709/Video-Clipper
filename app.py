@@ -253,8 +253,9 @@ button,.btn{background:var(--ac);color:var(--aci);border:0;border-radius:999px;p
 <form id="f">
 <label>Video link (YouTube, TikTok, Instagram, X, Facebook)</label><input name="url" type="url" placeholder="https://...">
 <label>or upload a file</label><input name="file" type="file" accept="video/*,audio/*">
-<label>YouTube cookies (optional, only if YouTube asks you to sign in)</label><input name="cookies" type="file" accept=".txt,text/plain">
-<label>Browser User-Agent (optional, used with YouTube cookies)</label><input name="user_agent" type="text" placeholder="Mozilla/5.0 ...">
+<label>YouTube login (optional — choose the browser where you are signed in)</label><select name="youtube_browser"><option value="">None</option><option value="chrome">Google Chrome</option><option value="edge">Microsoft Edge</option><option value="firefox">Firefox</option><option value="brave">Brave</option><option value="opera">Opera</option><option value="vivaldi">Vivaldi</option><option value="chromium">Chromium</option></select>
+<label>Or upload YouTube cookies.txt (optional fallback)</label><input name="cookies" type="file" accept=".txt,text/plain">
+<label>Browser User-Agent (optional, only if YouTube still blocks the download)</label><input name="user_agent" type="text" placeholder="Mozilla/5.0 ...">
 <label>Your own posts (a few, so the writing sounds like you)</label><textarea name="voice" rows="4"></textarea>
 <div class="row">
 <div><label>Clips</label><input name="n" type="number" min="1" max="10" value="5"></div>
