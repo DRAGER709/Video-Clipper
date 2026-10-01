@@ -6,8 +6,8 @@ from pathlib import Path
 import requests
 from flask import Flask, request, jsonify, send_from_directory, Response
 
-ROOT = Path(__file__).parent / "jobs"
-ROOT.mkdir(exist_ok=True)
+ROOT = Path(os.environ.get("CLIPMAKER_DATA_DIR", "/tmp/jobs" if os.environ.get("VERCEL") else str(Path(__file__).parent / "jobs")))
+ROOT.mkdir(parents=True, exist_ok=True)
 app = Flask(__name__)
 JOBS = {}
 
